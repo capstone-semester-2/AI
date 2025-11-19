@@ -1,0 +1,3 @@
+- model=conformer-medium
+- train=conformer_medium_train
+- train.dataset_path=./data
