@@ -16,6 +16,7 @@ import math
 from dataclasses import dataclass
 from kospeech.trainer.supervised_trainer import SupervisedTrainer
 
+from typing import Optional, List
 
 @dataclass
 class TrainConfig:

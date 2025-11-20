@@ -21,6 +21,18 @@ python kospeech1/bin/inference.py \
   --warmup
 
   
+  python kospeech1/bin/inference.py \
+  --multi_model_paths \
+      outputs/2-model/model.pt \
+      outputs/2-model/model-exear.pt \
+  --model_names normal hearing \
+  --vocab_path outputs/2-model/aihub_character_vocabs.csv \
+  --device cuda:0 \
+  --warmup
+
+  
+normal data/ID-02-27-N-BJJ-02-01-F-36-KK_중복-4.wav
+hearing data/ID-02-27-N-BJJ-02-01-F-36-KK_중복-4.wav
 
 > normal /path/to/normal_case.wav
 > hearing /path/to/hearing_case.wav

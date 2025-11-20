@@ -41,3 +41,6 @@ from kospeech.models.transformer import TransformerConfig, JointCTCAttentionTran
 from kospeech.models.deepspeech2 import DeepSpeech2Config
 from kospeech.models.jasper import JasperConfig
 from kospeech.models.conformer import ConformerSmallConfig, ConformerMediumConfig, ConformerLargeConfig
+from kospeech.models.adapter import MLPAdapter
+from kospeech.models.adapter_manager import AdapterManager
+

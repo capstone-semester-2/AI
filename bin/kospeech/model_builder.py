@@ -235,6 +235,8 @@ def build_deepspeech2(
         bidirectional: bool,
         activation: str,
         device: torch.device,
+        use_adapter: bool = False,
+        adapter_hidden_dims: list = None,
 ) -> nn.DataParallel:
     if dropout_p < 0.0:
         raise ParameterError("dropout probability should be positive")
@@ -247,6 +249,9 @@ def build_deepspeech2(
     if rnn_type.lower() not in EncoderRNN.supported_rnns.keys():
         raise ParameterError("Unsupported RNN Cell: {0}".format(rnn_type))
 
+    if adapter_hidden_dims is None:
+        adapter_hidden_dims = [512, 256]
+
     return nn.DataParallel(DeepSpeech2(
         input_dim=input_size,
         num_classes=num_classes,
@@ -257,6 +262,8 @@ def build_deepspeech2(
         bidirectional=bidirectional,
         activation=activation,
         device=device,
+        use_adapter=use_adapter,
+        adapter_hidden_dims=adapter_hidden_dims,
     )).to(device)
 
 

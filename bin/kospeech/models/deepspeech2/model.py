@@ -16,11 +16,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
-from typing import Tuple
+from typing import Tuple, Optional
 
 from kospeech.models.convolution import DeepSpeech2Extractor
 from kospeech.models.model import EncoderModel
 from kospeech.models.modules import Linear
+from kospeech.models.adapter import MLPAdapter
 
 
 class BNReluRNN(nn.Module):
@@ -97,6 +98,8 @@ class DeepSpeech2(EncoderModel):
         bidirectional (bool, optional): if True, becomes a bidirectional encoder (defulat: True)
         activation (str): type of activation function (default: hardtanh)
         device (torch.device): device - 'cuda' or 'cpu'
+        use_adapter (bool, optional): whether to use MLP adapter (default: False)
+        adapter_hidden_dims (list, optional): hidden dimensions for MLP adapter (default: [512, 256])
 
     Inputs: inputs, input_lengths
         - **inputs**: list of sequences, whose length is the batch size and within which each sequence is list of tokens
@@ -116,9 +119,14 @@ class DeepSpeech2(EncoderModel):
             bidirectional: bool = True,
             activation: str = 'hardtanh',
             device: torch.device = 'cuda',
+            use_adapter: bool = False,
+            adapter_hidden_dims: Optional[list] = None,
     ):
         super(DeepSpeech2, self).__init__()
         self.device = device
+        self.use_adapter = use_adapter
+        self.num_classes = num_classes
+        
         self.conv = DeepSpeech2Extractor(input_dim, activation=activation)
         self.rnn_layers = nn.ModuleList()
         rnn_output_size = rnn_hidden_dim << 1 if bidirectional else rnn_hidden_dim
@@ -138,6 +146,61 @@ class DeepSpeech2(EncoderModel):
             nn.LayerNorm(rnn_output_size),
             Linear(rnn_output_size, num_classes, bias=False),
         )
+
+        # Initialize MLP adapter if use_adapter is True
+        if use_adapter:
+            if adapter_hidden_dims is None:
+                adapter_hidden_dims = [512, 256]
+            
+            self.adapter = MLPAdapter(
+                input_dim=rnn_output_size,
+                hidden_dims=adapter_hidden_dims,
+                output_dim=num_classes,
+                dropout_p=dropout_p,
+            )
+        else:
+            self.adapter = None
+
+    def freeze_base_model(self) -> None:
+        """Freeze all base model parameters except adapter"""
+        for name, param in self.named_parameters():
+            if 'adapter' not in name:
+                param.requires_grad = False
+
+    def unfreeze_base_model(self) -> None:
+        """Unfreeze all base model parameters"""
+        for name, param in self.named_parameters():
+            param.requires_grad = True
+
+    def count_parameters(self, trainable_only: bool = False) -> dict:
+        """
+        Count parameters in the model.
+
+        Args:
+            trainable_only (bool): if True, count only trainable parameters
+
+        Returns:
+            dict: dictionary containing parameter counts for different parts
+        """
+        total_params = 0
+        adapter_params = 0
+        base_params = 0
+
+        for name, param in self.named_parameters():
+            if not trainable_only or param.requires_grad:
+                num_params = param.numel()
+                total_params += num_params
+                
+                if 'adapter' in name:
+                    adapter_params += num_params
+                else:
+                    base_params += num_params
+
+        return {
+            'total': total_params,
+            'base': base_params,
+            'adapter': adapter_params,
+        }
 
     def forward(self, inputs: Tensor, input_lengths: Tensor) -> Tuple[Tensor, Tensor]:
         """
@@ -160,6 +223,39 @@ class DeepSpeech2(EncoderModel):
         for rnn_layer in self.rnn_layers:
             outputs = rnn_layer(outputs, output_lengths)
 
-        outputs = self.fc(outputs.transpose(0, 1)).log_softmax(dim=-1)
+        outputs = outputs.transpose(0, 1)  # (batch, seq_len, dim)
 
-        return outputs, output_lengths
+        # If using adapter, pass through both fc and adapter
+        # 구버전 checkpoint에는 use_adapter / adapter 속성이 없을 수 있으므로 getattr 사용
+        use_adapter = getattr(self, "use_adapter", False)
+        adapter = getattr(self, "adapter", None)
+
+        if use_adapter and adapter is not None:
+            # Pass through fc layer (base output)
+            base_outputs = self.fc(outputs).log_softmax(dim=-1)
+
+            # Pass through adapter for personalized output
+            adapter_outputs = adapter(outputs)
+            adapter_outputs = adapter_outputs.log_softmax(dim=-1)
+
+            # Return both outputs: base and adapter
+            return base_outputs, output_lengths, adapter_outputs
+        else:
+            outputs = self.fc(outputs).log_softmax(dim=-1)
+            return outputs, output_lengths
+
+
+        # # If using adapter, pass through both fc and adapter
+        # if self.use_adapter and self.adapter is not None:
+        #     # Pass through fc layer
+        #     base_outputs = self.fc(outputs).log_softmax(dim=-1)
+            
+        #     # Pass through adapter for personalized output
+        #     adapter_outputs = self.adapter(outputs)
+        #     adapter_outputs = adapter_outputs.log_softmax(dim=-1)
+            
+        #     # Return both outputs: base and adapter
+        #     return base_outputs, output_lengths, adapter_outputs
+        # else:
+        #     outputs = self.fc(outputs).log_softmax(dim=-1)
+        #     return outputs, output_lengths
