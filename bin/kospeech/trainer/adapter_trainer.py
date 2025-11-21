@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import math
 import time
 import torch
@@ -121,6 +122,12 @@ class AdapterTrainer(object):
         logger.info('Base model parameters frozen. Only adapter will be trained.')
         logger.info(f'Adapter training start - Adapter name: {adapter_name}')
 
+        # 🔥 best CER 트래킹용 변수
+        best_valid_cer = float('inf')
+        best_epoch = -1
+
+
+
         train_begin_time = time.time()
 
         for epoch in range(num_epochs):
@@ -160,17 +167,62 @@ class AdapterTrainer(object):
             self._save_epoch_result(train_result=[self.train_dict, train_loss, train_cer],
                                      valid_result=[self.valid_dict, train_loss, valid_cer])
             logger.info(f'Epoch {epoch} Adapter training result saved!!')
+
+
+
+            # 🔥 best CER 갱신 시 어댑터 체크포인트 저장
+            if epoch == 0 or valid_cer < best_valid_cer:
+                best_valid_cer = valid_cer
+                best_epoch = epoch
+                logger.info(
+                    f"New best adapter CER {best_valid_cer:.4f} at epoch {best_epoch}, saving checkpoint..."
+                )
+                if isinstance(model, nn.DataParallel):
+                    self.adapter_manager.save_adapter(
+                        model.module,
+                        self.adapter_save_dir,
+                        f"{adapter_name}_best"
+                    )
+                else:
+                    self.adapter_manager.save_adapter(
+                        model,
+                        self.adapter_save_dir,
+                        f"{adapter_name}_best"
+                    )
+
+
             torch.cuda.empty_cache()
 
-        # Save adapter after training
+        # # Save adapter after training
+        # logger.info(f'Saving adapter: {adapter_name}')
+        # if isinstance(model, nn.DataParallel):
+        #     self.adapter_manager.save_adapter(model.module, self.adapter_save_dir, adapter_name)
+        # else:
+        #     self.adapter_manager.save_adapter(model, self.adapter_save_dir, adapter_name)
+
+        # logger.info(f'Adapter training complete!')
+        # return model
+
+        # Save adapter after training (state_dict-only)
         logger.info(f'Saving adapter: {adapter_name}')
         if isinstance(model, nn.DataParallel):
-            self.adapter_manager.save_adapter(model.module, self.adapter_save_dir, adapter_name)
+            base_model = model.module
+            self.adapter_manager.save_adapter(base_model, self.adapter_save_dir, adapter_name)
         else:
-            self.adapter_manager.save_adapter(model, self.adapter_save_dir, adapter_name)
+            base_model = model
+            self.adapter_manager.save_adapter(base_model, self.adapter_save_dir, adapter_name)
+
+        # # ✅ 전체 모델 객체(DeepSpeech2 + adapter)를 같이 저장
+        # full_model_path = os.path.join(self.adapter_save_dir, f"{adapter_name}_full_model.pt")
+        # torch.save(base_model, full_model_path)
+        # logger.info(f'Full model with adapter saved to: {full_model_path}')
 
         logger.info(f'Adapter training complete!')
         return model
+
+
+
+
 
     def _train_epoches(
             self,

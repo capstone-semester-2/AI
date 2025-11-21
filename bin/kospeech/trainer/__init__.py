@@ -15,6 +15,8 @@
 import math
 from dataclasses import dataclass
 from kospeech.trainer.supervised_trainer import SupervisedTrainer
+from kospeech.trainer.adapter_trainer import AdapterTrainer   # ⬅️ 추가
+
 
 from typing import Optional, List
 
@@ -72,6 +74,24 @@ class DeepSpeech2TrainConfig(TrainConfig):
     num_epochs: int = 70
     reduction: str = "mean"
     lr_scheduler: str = 'tri_stage_lr_scheduler'
+
+
+
+@dataclass
+class AdapterTrainConfig(DeepSpeech2TrainConfig):
+    """
+    Adapter 전용 학습 설정.
+
+    - base_model_path      : 기존 학습된 DS2 전체 모델 경로
+    - adapter_name         : 저장할 어댑터 이름
+    - adapter_save_dir     : 어댑터 저장 디렉토리
+    - adapter_hidden_dims  : 어댑터 MLP hidden dim 리스트 (예: [512, 256])
+    """
+    base_model_path: str = ""
+    adapter_name: str = "default"
+    adapter_save_dir: str = "adapters"
+    adapter_hidden_dims: Optional[List[int]] = None
+
 
 
 @dataclass

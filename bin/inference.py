@@ -42,7 +42,7 @@ hearing data/ID-02-27-N-BJJ-02-01-F-36-KK_중복-4.wav
 
 
 
-
+이거 여전히 동작
 python kospeech1/bin/inference.py \
   --multi_model_paths \
       outputs/2-model/model.pt \
@@ -51,6 +51,19 @@ python kospeech1/bin/inference.py \
   --vocab_path outputs/2-model/aihub_character_vocabs.csv \
   --device cuda:0 \
   --warmup
+
+
+
+python kospeech1/bin/inference.py \
+  --multi_model_paths \
+      outputs/2-model/model.pt \
+      outputs/2-model/model.pt \
+  --model_names normal hearing \
+  --adapter_paths none outputs/2-model/kor-bjj.pt \
+  --vocab_path outputs/2-model/aihub_character_vocabs.csv \
+  --device cuda:0 \
+  --warmup
+
 
   
 
@@ -90,7 +103,7 @@ from torch.nn.parallel.data_parallel import DataParallel
 from kospeech.vocabs.ksponspeech import KsponSpeechVocabulary
 from kospeech.data.audio.core import load_audio
 from kospeech.models import (
-    SpeechTransformer, Jasper, DeepSpeech2, ListenAttendSpell, Conformer
+    SpeechTransformer, Jasper, DeepSpeech2, ListenAttendSpell, Conformer, MLPAdapter,
 )
 
 from tools import revise
@@ -148,11 +161,15 @@ class ASRInference:
         device: str = "cpu",
         dtype: str = "float32",
         warmup: bool = False,
+        adapter_path: Optional[str] = None,   # ← NEW
     ):
         """
         모델/사전을 메모리에 고정 로딩.
+        adapter_path 가 주어지면 DeepSpeech2 모델에 MLPAdapter 를 붙여서 사용.
         """
         self.device = device
+        self.adapter_path = adapter_path
+        self.adapter_loaded: bool = False
 
         # PyTorch 2.6+ 대응: 안전목록 + weights_only=False 로드, DataParallel 해제
         add_safe_globals([DataParallel])
@@ -167,7 +184,11 @@ class ASRInference:
             self.model = self.model.bfloat16()
         # else float32 default
 
-        # KoSpeech vocab (모든 모델이 같은 vocab 사용 가능)
+        # Adapter 붙이기 (필요한 경우, DeepSpeech2 전용)
+        if adapter_path:
+            self._attach_adapter(adapter_path)
+
+        # KoSpeech vocab
         self.vocab = KsponSpeechVocabulary(vocab_path)
 
         # 성능 관련 설정
@@ -178,8 +199,61 @@ class ASRInference:
         if warmup:
             self._warmup()
 
+    def _attach_adapter(self, adapter_path: str) -> None:
+        """DeepSpeech2 용 adapter .pt 를 로드해서 모델에 붙인다."""
+        if not isinstance(self.model, DeepSpeech2):
+            print(f"[WARN] adapter_path={adapter_path} 이 지정되었지만 모델이 DeepSpeech2 가 아니라서 무시합니다.")
+            return
+
+        try:
+            # 🔥 PyTorch 2.6+ 기본 weights_only=True 때문에 실패했으니,
+            #    여기서는 명시적으로 weights_only=False 로 "옛날 방식" 로더 사용
+            ckpt = torch.load(adapter_path, map_location="cpu", weights_only=False)
+        except Exception as e:
+            print(f"[WARN] adapter 로드 실패 ({adapter_path}): {e}")
+            return
+
+        # 우리가 AdapterManager.save_adapter(...) 에서 저장한 형식:
+        # {
+        #   'adapter_state_dict': ...,
+        #   'input_dim': int,
+        #   'hidden_dims': list or ListConfig,
+        #   'output_dim': int,
+        #   'adapter_name': str,
+        # }
+        state_dict = ckpt.get("adapter_state_dict")
+        input_dim = ckpt.get("input_dim")
+        hidden_dims_raw = ckpt.get("hidden_dims")
+        output_dim = ckpt.get("output_dim")
+
+        if state_dict is None or input_dim is None or hidden_dims_raw is None or output_dim is None:
+            print(f"[WARN] adapter 체크포인트 형식이 잘못되었습니다: {adapter_path}")
+            return
+
+        # 🔥 ListConfig 같은 것도 일반 list 로 변환
+        try:
+            hidden_dims = list(hidden_dims_raw)
+        except TypeError:
+            hidden_dims = [int(hidden_dims_raw)]
+
+        adapter = MLPAdapter(
+            input_dim=input_dim,
+            hidden_dims=hidden_dims,
+            output_dim=output_dim,
+            dropout_p=0.0,  # 추론에서는 dropout 안 씀
+        )
+        adapter.load_state_dict(state_dict)
+        adapter = adapter.to(self.device)
+
+        # 모델에 부착
+        self.model.adapter = adapter
+        setattr(self.model, "use_adapter", True)
+
+        self.adapter_loaded = True
+        print(f"[INFO] Adapter loaded and attached from: {adapter_path}")
+
+
     def _warmup(self):
-        # 아주 짧은 더미 입력으로 1번 recognize 실행
         dummy = torch.zeros(100, 80, dtype=torch.float32)
         lengths = torch.LongTensor([dummy.size(0)])
         dummy = dummy.to(self.device)
@@ -206,17 +280,45 @@ class ASRInference:
 
     def _recognize_tensor(self, feature: torch.Tensor, input_length: torch.LongTensor):
         m = self.model
+
         if isinstance(m, ListenAttendSpell):
             m.encoder.device = self.device
             m.decoder.device = self.device
             y_hats = m.recognize(feature.unsqueeze(0), input_length)
+
         elif isinstance(m, DeepSpeech2):
+            # DeepSpeech2 + (optional) adapter
             m.device = self.device
-            y_hats = m.recognize(feature.unsqueeze(0), input_length)
+            use_adapter = getattr(m, "use_adapter", False) and getattr(m, "adapter", None) is not None
+
+            if use_adapter:
+                # forward 를 직접 호출해 adapter 출력을 받아 decode
+                outputs = m(feature.unsqueeze(0), input_length)
+                if isinstance(outputs, (tuple, list)):
+                    if len(outputs) == 3:
+                        _, _, adapter_log_probs = outputs
+                        predicted_log_probs = adapter_log_probs
+                    elif len(outputs) == 2:
+                        predicted_log_probs, _ = outputs
+                    else:
+                        predicted_log_probs = outputs[0]
+                else:
+                    predicted_log_probs = outputs
+
+                if getattr(m, "decoder", None) is not None:
+                    y_hats = m.decoder.decode(predicted_log_probs)
+                else:
+                    y_hats = m.decode(predicted_log_probs)
+            else:
+                # 기존 경로 그대로
+                y_hats = m.recognize(feature.unsqueeze(0), input_length)
+
         elif isinstance(m, (SpeechTransformer, Jasper, Conformer)):
             y_hats = m.recognize(feature.unsqueeze(0), input_length)
+
         else:
             y_hats = m.recognize(feature.unsqueeze(0), input_length)
+
         return y_hats
 
     def infer_one(
@@ -247,14 +349,13 @@ class ASRInference:
         t_inf0 = time.perf_counter()
         with torch.inference_mode():
             y_hats = self._recognize_tensor(feature, input_length)
-            if self.device.startswith("cuda"):
+            if str(self.device).startswith("cuda"):
                 torch.cuda.synchronize()
         t_inf1 = time.perf_counter()
 
         # 4) 후처리
         sentence = self.vocab.label_to_string(y_hats.cpu().detach().numpy())
         sentence = revise(sentence)
-
         text = sentence[0] if isinstance(sentence, (list, tuple)) else sentence
         text = text.strip()
 
@@ -291,6 +392,7 @@ class MultiASRInference:
     """
     최대 3개 모델까지 동시에 올려두고,
     이름으로 선택해서 추론하는 래퍼.
+    각 모델마다 adapter 를 별도로 붙일 수 있음.
     """
     def __init__(
         self,
@@ -300,6 +402,7 @@ class MultiASRInference:
         device: str = "cpu",
         dtype: str = "float32",
         warmup: bool = False,
+        adapter_paths: Optional[Sequence[Optional[str]]] = None,  # ← NEW
     ):
         if len(model_paths) == 0:
             raise ValueError("model_paths 가 비었습니다.")
@@ -309,16 +412,27 @@ class MultiASRInference:
             raise ValueError("model_names 길이는 model_paths 길이와 같아야 합니다.")
 
         self.engines: Dict[str, ASRInference] = {}
-        for name, path in zip(model_names, model_paths):
+        for idx, (name, path) in enumerate(zip(model_names, model_paths)):
             if name in self.engines:
                 raise ValueError(f"중복된 모델 이름: {name}")
+
+            adapter_path: Optional[str] = None
+            if adapter_paths is not None and idx < len(adapter_paths):
+                ap = adapter_paths[idx]
+                if ap and str(ap).lower() not in ("none", "-"):
+                    adapter_path = ap
+
             print(f"[INFO] load model '{name}' from {path}")
+            if adapter_path:
+                print(f"       -> adapter: {adapter_path}")
+
             self.engines[name] = ASRInference(
                 model_path=path,
                 vocab_path=vocab_path,
                 device=device,
                 dtype=dtype,
                 warmup=warmup,
+                adapter_path=adapter_path,
             )
         self.default_name = model_names[0]
 
@@ -346,6 +460,7 @@ class MultiASRInference:
         )
         payload["model_name"] = name
         return payload, t
+
 
 
 # -----------------------------
@@ -480,6 +595,27 @@ def main():
         help="모델 이름을 생략했을 때 사용할 기본 모델 이름 (기본: 첫 번째 모델)",
     )
 
+    parser.add_argument(
+        "--adapter_paths",
+        type=str,
+        nargs="*",
+        help=(
+            "멀티 모델 모드에서 각 모델에 대응되는 adapter .pt 경로 목록. "
+            "길이가 --multi_model_paths 와 같거나 더 짧을 수 있습니다. "
+            "비어있거나 'none' / '-' 인 항목은 해당 모델에서 adapter 를 사용하지 않습니다."
+        ),
+    )
+
+
+    parser.add_argument(
+        "--adapter_path",
+        type=str,
+        default=None,
+        help="단일 모델 모드에서 사용할 adapter .pt 경로 (선택, DeepSpeech2 전용)",
+    )
+
+
+
     parser.add_argument("--vocab_path", type=str, default="data/vocab/aihub_character_vocabs.csv")
     parser.add_argument("--device", type=str, default="cpu")  # cpu / cuda / cuda:0
     parser.add_argument("--dtype", type=str, default="float32",
@@ -513,6 +649,18 @@ def main():
             # 기본 이름: m1, m2, ...
             model_names = [f"m{i+1}" for i in range(len(args.multi_model_paths))]
 
+        # adapter_paths 정규화 (선택)
+        adapter_paths: Optional[List[Optional[str]]] = None
+        if args.adapter_paths:
+            if len(args.adapter_paths) > len(args.multi_model_paths):
+                parser.error("--adapter_paths 길이는 --multi_model_paths 보다 길 수 없습니다.")
+            adapter_paths = list(args.adapter_paths)
+            # 짧으면 뒤를 None 으로 채움
+            if len(adapter_paths) < len(args.multi_model_paths):
+                adapter_paths += [None] * (len(args.multi_model_paths) - len(adapter_paths))
+
+
+
         multi = MultiASRInference(
             model_paths=args.multi_model_paths,
             model_names=model_names,
@@ -520,6 +668,7 @@ def main():
             device=args.device,
             dtype=args.dtype,
             warmup=args.warmup,
+            adapter_paths=adapter_paths,   # ← NEW
         )
 
         # default_model 지정
@@ -549,6 +698,7 @@ def main():
             device=args.device,
             dtype=args.dtype,
             warmup=args.warmup,
+            adapter_path=args.adapter_path,
         )
 
         if args.paths:

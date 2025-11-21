@@ -143,6 +143,8 @@ def train_adapter(config: DictConfig) -> nn.DataParallel:
     Returns:
         Model with trained adapter
     """
+    import torch.nn as nn
+    
     random.seed(config.train.seed)
     torch.manual_seed(config.train.seed)
     torch.cuda.manual_seed_all(config.train.seed)
@@ -181,8 +183,8 @@ def train_adapter(config: DictConfig) -> nn.DataParallel:
     else:
         input_size = config.audio.n_mels
 
-    # Load pre-trained model
-    checkpoint = torch.load(base_model_path, map_location=device, weights_only=False)
+    # Load pre-trained model (full object or state_dict 모두 허용)
+    raw_checkpoint = torch.load(base_model_path, map_location=device, weights_only=False)
 
     # Create model with adapter
     from kospeech.models import DeepSpeech2
@@ -200,15 +202,37 @@ def train_adapter(config: DictConfig) -> nn.DataParallel:
         adapter_hidden_dims=adapter_hidden_dims,
     )).to(device)
 
-    # Load pre-trained weights
+    # ---- 여기부터가 핵심: raw_checkpoint 를 항상 state_dict 로 정규화 ----
     try:
-        if isinstance(checkpoint, dict) and 'module' in checkpoint:
-            model.load_state_dict(checkpoint['module'], strict=False)
+        import torch.nn as nn
+
+        if isinstance(raw_checkpoint, nn.DataParallel):
+            # torch.save(DataParallel(...)) 로 저장해둔 경우
+            state_dict = raw_checkpoint.module.state_dict()
+        elif isinstance(raw_checkpoint, nn.Module):
+            # torch.save(model) 로 저장해둔 경우
+            state_dict = raw_checkpoint.state_dict()
+        elif isinstance(raw_checkpoint, dict):
+            # 여러 형태의 dict 지원
+            if 'state_dict' in raw_checkpoint and isinstance(raw_checkpoint['state_dict'], dict):
+                state_dict = raw_checkpoint['state_dict']
+            elif 'model' in raw_checkpoint and isinstance(raw_checkpoint['model'], dict):
+                state_dict = raw_checkpoint['model']
+            elif 'module' in raw_checkpoint and isinstance(raw_checkpoint['module'], dict):
+                state_dict = raw_checkpoint['module']
+            else:
+                # 이미 state_dict 라고 가정
+                state_dict = raw_checkpoint
         else:
-            model.module.load_state_dict(checkpoint, strict=False)
+            raise TypeError(f"Unexpected checkpoint type: {type(raw_checkpoint)}")
+
+        # DataParallel 안쪽 모듈에 로드
+        model.module.load_state_dict(state_dict, strict=False)
         logger.info('Pre-trained model weights loaded successfully')
+
     except Exception as e:
         logger.warning(f'Could not load pre-trained weights: {e}')
+
 
     # Freeze base model
     model.module.freeze_base_model()

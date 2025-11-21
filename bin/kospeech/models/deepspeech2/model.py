@@ -147,19 +147,27 @@ class DeepSpeech2(EncoderModel):
             Linear(rnn_output_size, num_classes, bias=False),
         )
 
-        # Initialize MLP adapter if use_adapter is True
+        # 🔁 Post-Encoder Residual adapter
+        #   - encoder 출력 h: (B, T, H)
+        #   - adapter(h): (B, T, H)
+        #   - h' = h + adapter(h)
         if use_adapter:
             if adapter_hidden_dims is None:
                 adapter_hidden_dims = [512, 256]
-            
+
             self.adapter = MLPAdapter(
                 input_dim=rnn_output_size,
                 hidden_dims=adapter_hidden_dims,
-                output_dim=num_classes,
+                output_dim=rnn_output_size,   # ⬅️ 기존 num_classes → rnn_output_size 로 변경
                 dropout_p=dropout_p,
             )
+            self.use_adapter = True
         else:
             self.adapter = None
+            self.use_adapter = False
+
+
+
 
     def freeze_base_model(self) -> None:
         """Freeze all base model parameters except adapter"""
@@ -204,58 +212,74 @@ class DeepSpeech2(EncoderModel):
 
     def forward(self, inputs: Tensor, input_lengths: Tensor) -> Tuple[Tensor, Tensor]:
         """
-        Forward propagate a `inputs` for  ctc training.
-
-        Args:
-            inputs (torch.FloatTensor): A input sequence passed to encoder. Typically for inputs this will be a padded
-                `FloatTensor` of size ``(batch, seq_length, dimension)``.
-            input_lengths (torch.LongTensor): The length of input tensor. ``(batch)``
+        Forward propagate inputs for CTC training.
 
         Returns:
-            (Tensor, Tensor):
-
-            * predicted_log_prob (torch.FloatTensor)s: Log probability of model predictions.
-            * output_lengths (torch.LongTensor): The length of output tensor ``(batch)``
+            - use_adapter == False:
+                (log_probs, output_lengths)
+            - use_adapter == True:
+                (base_log_probs, output_lengths, adapter_log_probs)
+                  * base_log_probs    : 원본 encoder 출력 사용
+                  * adapter_log_probs : residual adapter 적용 후 출력 사용
         """
+        # 1) Encoder (conv + RNN)
         outputs, output_lengths = self.conv(inputs, input_lengths)
         outputs = outputs.permute(1, 0, 2).contiguous()
 
         for rnn_layer in self.rnn_layers:
             outputs = rnn_layer(outputs, output_lengths)
 
-        outputs = outputs.transpose(0, 1)  # (batch, seq_len, dim)
+        # outputs: (T, B, H) -> (B, T, H)
+        outputs = outputs.transpose(0, 1)
 
-        # If using adapter, pass through both fc and adapter
-        # 구버전 checkpoint에는 use_adapter / adapter 속성이 없을 수 있으므로 getattr 사용
+        # 2) 어댑터 사용 여부 (구버전 checkpoint 대비 getattr 사용)
         use_adapter = getattr(self, "use_adapter", False)
         adapter = getattr(self, "adapter", None)
 
         if use_adapter and adapter is not None:
-            # Pass through fc layer (base output)
-            base_outputs = self.fc(outputs).log_softmax(dim=-1)
+            # base features (encoder output)
+            base_features = outputs                        # (B, T, H)
 
-            # Pass through adapter for personalized output
-            adapter_outputs = adapter(outputs)
-            adapter_outputs = adapter_outputs.log_softmax(dim=-1)
+            # residual: h' = h + adapter(h)
+            residual = adapter(base_features)              # (B, T, H)
+            adapted_features = base_features + residual    # (B, T, H)
 
-            # Return both outputs: base and adapter
-            return base_outputs, output_lengths, adapter_outputs
+            # logits -> log_probs
+            base_logits = self.fc(base_features)           # (B, T, C)
+            adapter_logits = self.fc(adapted_features)     # (B, T, C)
+
+            base_log_probs = base_logits.log_softmax(dim=-1)
+            adapter_log_probs = adapter_logits.log_softmax(dim=-1)
+
+            # AdapterTrainer 에서 len(...) == 3 기준으로 처리하고 있으므로 형식 유지
+            return base_log_probs, output_lengths, adapter_log_probs
         else:
-            outputs = self.fc(outputs).log_softmax(dim=-1)
-            return outputs, output_lengths
+            logits = self.fc(outputs)
+            log_probs = logits.log_softmax(dim=-1)
+            return log_probs, output_lengths
 
 
-        # # If using adapter, pass through both fc and adapter
-        # if self.use_adapter and self.adapter is not None:
-        #     # Pass through fc layer
-        #     base_outputs = self.fc(outputs).log_softmax(dim=-1)
-            
-        #     # Pass through adapter for personalized output
-        #     adapter_outputs = self.adapter(outputs)
-        #     adapter_outputs = adapter_outputs.log_softmax(dim=-1)
-            
-        #     # Return both outputs: base and adapter
-        #     return base_outputs, output_lengths, adapter_outputs
-        # else:
-        #     outputs = self.fc(outputs).log_softmax(dim=-1)
-        #     return outputs, output_lengths
+
+    @torch.no_grad()
+    def recognize(self, inputs: Tensor, input_lengths: Tensor) -> Tensor:
+        """
+        CTC decoding helper.
+
+        - use_adapter == False -> base branch 사용
+        - use_adapter == True  -> adapter branch 사용
+        """
+        outputs = self.forward(inputs, input_lengths)
+
+        # use_adapter=True 이면 (base_log_probs, lengths, adapter_log_probs)
+        if isinstance(outputs, (tuple, list)) and len(outputs) == 3:
+            base_log_probs, output_lengths, adapter_log_probs = outputs
+
+            if getattr(self, "use_adapter", False):
+                predicted_log_probs = adapter_log_probs
+            else:
+                predicted_log_probs = base_log_probs
+        else:
+            # use_adapter=False -> (log_probs, lengths)
+            predicted_log_probs, output_lengths = outputs
+
+        return self.decode(predicted_log_probs)
