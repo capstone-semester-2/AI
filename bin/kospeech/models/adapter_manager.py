@@ -63,7 +63,7 @@ class AdapterManager:
         }
         
         # Save to file
-        adapter_file = os.path.join(save_path, f'{adapter_name}_adapter.pt')
+        adapter_file = os.path.join(save_path, f'{adapter_name}.pt')
         torch.save(checkpoint, adapter_file)
         print(f"Adapter saved to: {adapter_file}")
         

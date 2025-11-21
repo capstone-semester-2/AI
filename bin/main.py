@@ -20,6 +20,8 @@ import torch.nn as nn
 import hydra
 from hydra.core.config_store import ConfigStore
 from omegaconf import OmegaConf, DictConfig
+from hydra.utils import get_original_cwd
+
 
 from kospeech.data.data_loader import split_dataset
 from kospeech.optim import Optimizer
@@ -144,7 +146,7 @@ def train_adapter(config: DictConfig) -> nn.DataParallel:
         Model with trained adapter
     """
     import torch.nn as nn
-    
+
     random.seed(config.train.seed)
     torch.manual_seed(config.train.seed)
     torch.cuda.manual_seed_all(config.train.seed)
@@ -254,6 +256,19 @@ def train_adapter(config: DictConfig) -> nn.DataParallel:
     )
     criterion = get_criterion(config, vocab)
 
+    # adapter 저장 위치들 설정
+    # 1) run 내부 저장 (Hydra run dir 기준)
+    adapter_save_dir = config.train.adapter_save_dir
+
+    # 2) 글로벌 best 저장 위치 (optional)
+    best_adapter_export_dir = getattr(config.train, "best_adapter_export_dir", None)
+    if best_adapter_export_dir:
+        # 상대경로면 프로젝트 루트 기준으로 절대경로로 변환
+        if not os.path.isabs(best_adapter_export_dir):
+            best_adapter_export_dir = os.path.join(get_original_cwd(), best_adapter_export_dir)
+    else:
+        best_adapter_export_dir = None
+
     # Create adapter trainer
     trainer = AdapterTrainer(
         optimizer=optimizer,
@@ -268,6 +283,7 @@ def train_adapter(config: DictConfig) -> nn.DataParallel:
         architecture='deepspeech2',
         vocab=vocab,
         adapter_save_dir=adapter_save_dir,
+        best_adapter_export_dir=best_adapter_export_dir,
     )
 
     # Train adapter

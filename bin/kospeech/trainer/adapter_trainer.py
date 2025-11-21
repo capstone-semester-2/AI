@@ -71,6 +71,8 @@ class AdapterTrainer(object):
             architecture: str = 'deepspeech2',
             vocab: Vocabulary = None,
             adapter_save_dir: str = './adapters',
+            best_adapter_export_dir: str | None = None, 
+
     ) -> None:
         self.num_workers = num_workers
         self.optimizer = optimizer
@@ -86,6 +88,8 @@ class AdapterTrainer(object):
         self.vocab = vocab
         self.adapter_save_dir = adapter_save_dir
         self.adapter_manager = AdapterManager()
+        self.best_adapter_export_dir = best_adapter_export_dir  # 🔥 추가
+
 
         self.log_format = "step: {:4d}/{:4d}, loss: {:.6f}, " \
                           "cer: {:.2f}, elapsed: {:.2f}s {:.2f}m {:.2f}h, lr: {:.6f}"
@@ -177,18 +181,32 @@ class AdapterTrainer(object):
                 logger.info(
                     f"New best adapter CER {best_valid_cer:.4f} at epoch {best_epoch}, saving checkpoint..."
                 )
+
+                # 1) 현재 run 폴더 안에 <adapter_name>_best.pt 저장 (지금처럼)
                 if isinstance(model, nn.DataParallel):
-                    self.adapter_manager.save_adapter(
-                        model.module,
-                        self.adapter_save_dir,
-                        f"{adapter_name}_best"
-                    )
+                    base_model = model.module
                 else:
+                    base_model = model
+
+                self.adapter_manager.save_adapter(
+                    base_model,
+                    self.adapter_save_dir,
+                    f"{adapter_name}_best",
+                )
+
+                # 2) 🔥 글로벌 위치에도 <adapter_name>.pt 로 저장 (덮어쓰기)
+                if self.best_adapter_export_dir:
+                    os.makedirs(self.best_adapter_export_dir, exist_ok=True)
                     self.adapter_manager.save_adapter(
-                        model,
-                        self.adapter_save_dir,
-                        f"{adapter_name}_best"
+                        base_model,
+                        self.best_adapter_export_dir,
+                        adapter_name,   # ← 이름만 그대로, 뒤에 _best 안 붙임
                     )
+                    logger.info(
+                        f"Best adapter (global) saved to dir={self.best_adapter_export_dir} "
+                        f"name={adapter_name}.pt"
+                    )
+
 
 
             torch.cuda.empty_cache()

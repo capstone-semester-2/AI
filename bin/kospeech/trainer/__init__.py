@@ -91,7 +91,7 @@ class AdapterTrainConfig(DeepSpeech2TrainConfig):
     adapter_name: str = "default"
     adapter_save_dir: str = "adapters"
     adapter_hidden_dims: Optional[List[int]] = None
-
+    best_adapter_export_dir: Optional[str] = None   # 🔥 추가
 
 
 @dataclass
