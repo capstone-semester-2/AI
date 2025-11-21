@@ -14,10 +14,7 @@
 
 import math
 from dataclasses import dataclass
-
-# 트레이너 클래스들 전부 export
 from kospeech.trainer.supervised_trainer import SupervisedTrainer
-from kospeech.trainer.adapter_trainer import AdapterTrainer  # 👈 우리가 만든 어댑터 트레이너
 
 from typing import Optional, List
 
@@ -147,21 +144,3 @@ class ConformerMediumTrainConfig(ConformerTrainConfig):
 class ConformerLargeTrainConfig(ConformerTrainConfig):
         peak_lr: float = 1e-04
 
-
-
-
-@dataclass
-class AdapterTrainConfig(DeepSpeech2TrainConfig):
-    """
-    DeepSpeech2 + Adapter 전용 학습 설정.
-    main.py 에서 train=adapter_train 쓸 때 이 설정을 씀.
-    """
-    # 어댑터가 얹힐 base DS2 모델 (state_dict) 경로
-    base_model_path: str = ""
-
-    # 어댑터 이름 및 저장 경로
-    adapter_name: str = "default"
-    adapter_save_dir: str = "./adapters"
-
-    # 어댑터 MLP hidden layer 크기들
-    adapter_hidden_dims: Optional[List[int]] = None
