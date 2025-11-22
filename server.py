@@ -1,39 +1,3 @@
-
-"""
-
-export MODEL_PATH=./outputs/2-model/model.pt
-export VOCAB_PATH=./outputs/2-model/aihub_character_vocabs.csv
-export DEVICE=cuda:0 
-uvicorn kospeech1.server:app --reload --host 0.0.0.0 --port 8000
-
-
-export PYTHONPATH="$PWD/kospeech1/bin:$PYTHONPATH"
-export MODEL_PATH="$PWD/outputs/2-model/model.pt"
-export VOCAB_PATH="$PWD/outputs/2-model/aihub_character_vocabs.csv"
-export DEVICE="cuda:0"   # GPU 없으면 cpu
-uvicorn kospeech1.server:app --reload --host 0.0.0.0 --port 8000
-
-
-임포트 빠른 진단 명령어
-python -c "import kospeech1.bin.inference as m; print(m.__file__)"
-
-
-로컬 실험 터미널1
-python -m http.server 9000 --directory ./data_test
-
-로컬 실험 터미널2
-curl -X POST http://127.0.0.1:8000/api/analyze \
- -H "Content-Type: application/json" \
- -d '{"audioUrl":"http://127.0.0.1:9000/ID-02-21-N-BSR-02-02-M-32-GS2.wav","requestId":"local-003"}'
-
-
-
-
-
-
-"""
-
-
 # -- 상단 import 부 --
 import os, tempfile, hashlib, time, asyncio, re, logging, signal
 from typing import Optional, Dict, Any
@@ -55,7 +19,7 @@ IDLE_SHUTDOWN_S = int(os.getenv("IDLE_SHUTDOWN_S", 60000))  # ★ 유휴 종료 
 HTTP_TIMEOUT = httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0)
 
 # 프로덕션: S3만
-SAFE_HOST = re.compile(r"(^|\.)amazonaws\.com$", re.IGNORECASE)
+# SAFE_HOST = re.compile(r"(^|\.)amazonaws\.com$", re.IGNORECASE)
 # 로컬 테스트용:
 # SAFE_HOST = re.compile(r"(localhost|127\.0\.0\.1|(^|\.)amazonaws\.com$)", re.IGNORECASE)
 
@@ -128,10 +92,12 @@ class AnalyzeReq(BaseModel):
 async def korean(req: AnalyzeReq):
     t0 = time.time()
 
-    # 허용 도메인 체크
-    host = httpx.URL(str(req.audioUrl)).host or ""
-    if not SAFE_HOST.search(host):
-        raise HTTPException(400, "audioUrl must be an S3 presigned URL (amazonaws.com).")
+    print(f"Audio URL: {req.audioUrl}")
+
+    # # 허용 도메인 체크
+    # host = httpx.URL(str(req.audioUrl)).host or ""
+    # if not SAFE_HOST.search(host):
+    #     raise HTTPException(400, "audioUrl must be an S3 presigned URL (amazonaws.com).")
 
     # 사용자 단일 처리(옵션) - 이제 EmitterId 기반
     user_lock = _get_user_lock(req.EmitterId) if req.EmitterId else None
@@ -203,6 +169,10 @@ async def korean(req: AnalyzeReq):
         result["title"] = original_name
 
         t2 = time.time()
+
+
+
+        print(f"result: {result}")
 
         out: Dict[str, Any] = {
             "sha256": h.hexdigest(),
