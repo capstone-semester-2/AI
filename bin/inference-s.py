@@ -18,51 +18,44 @@ from kospeech.models import (
 from .tools import revise
 
 # --------------------------
-# 서버용 설정 (3 base + 2 adapter 엔진)
+# 서버용 설정 (3 base + 1 adapter)
 # --------------------------
-# 👇 이 5개 파일 경로만 네 상황에 맞게 고치면 됨
-ENV_MODEL_1_PATH  = os.getenv("MODEL_PATH_1", "/home/ubuntu/model/model1.pt")  # 기본 한국어
-ENV_MODEL_2_PATH  = os.getenv("MODEL_PATH_2", "/home/ubuntu/model/model2.pt")  # hearing 베이스
-ENV_MODEL_3_PATH  = os.getenv("MODEL_PATH_3", "/home/ubuntu/model/model3.pt")  # neuro 베이스
+# 👇 이 4개 파일 경로만 네 상황에 맞게 고치면 됨
+ENV_MODEL_1_PATH  = os.getenv("MODEL_PATH_1",  "/home/ubuntu/model/model1.pt")
+ENV_MODEL_2_PATH = os.getenv("MODEL_PATH_2", "/home/ubuntu/model/model2.pt")
+ENV_MODEL_3_PATH   = os.getenv("MODEL_PATH_3",   "/home/ubuntu/model/model3.pt")
 
-# hearing / neuro 각각 별도 adapter-only 체크포인트
-ENV_ADAPTER_2_PATH = os.getenv("ADAPTER_PATH_2", "/home/ubuntu/model/adp2.pt")  # 모델2용
-ENV_ADAPTER_3_PATH = os.getenv("ADAPTER_PATH_3", "/home/ubuntu/model/adp3.pt")  # 모델3용
+# hearing 베이스에 붙일 adapter-only 체크포인트
+ENV_ADAPTER_PATH       = os.getenv("ADAPTER_PATH_2", "/home/ubuntu/model/adp.pt")
 
 ENV_VOCAB_PATH = os.getenv("VOCAB_PATH", "/home/ubuntu/model/aihub_character_vocabs.csv")
 ENV_DEVICE     = os.getenv("DEVICE", "cuda:0")  # 기본 cuda:0
 
-# 서버에서 사용할 엔진:
-#  - korean          : 일반 모델
-#  - hearing         : 언어·청각장애 (베이스만)
-#  - neuro           : 뇌성마비 (베이스만)
-#  - hearing_adapter : 모델2 + 개인 어댑터(ADAPTER_PATH_2)
-#  - neuro_adapter   : 모델3 + 개인 어댑터(ADAPTER_PATH_3)
+# 서버에서 사용할 엔진 4개:
+#  - normal    : 일반 모델
+#  - hearing   : 언어청각장애
+#  - neuro     : 뇌성마비
+#  - adapter   : 모델 + 개인 어댑터
 SERVER_MODEL_CONFIG = [
     {
         "name": "korean",
         "model_path": ENV_MODEL_1_PATH,
-        "adapter_path": None,
+        "adapter_path": None,                # 어댑터 없음
     },
     {
         "name": "hearing",
         "model_path": ENV_MODEL_2_PATH,
-        "adapter_path": None,
+        "adapter_path": None,                # 어댑터 없음
     },
     {
         "name": "neuro",
         "model_path": ENV_MODEL_3_PATH,
-        "adapter_path": None,
+        "adapter_path": None,                # 어댑터 없음
     },
     {
-        "name": "hearing_adapter",
-        "model_path": ENV_MODEL_2_PATH,
-        "adapter_path": ENV_ADAPTER_2_PATH,
-    },
-    {
-        "name": "neuro_adapter",
-        "model_path": ENV_MODEL_3_PATH,
-        "adapter_path": ENV_ADAPTER_3_PATH,
+        "name": "adapter",
+        "model_path": ENV_MODEL_2_PATH, 
+        "adapter_path": ENV_ADAPTER_PATH, 
     },
 ]
 
@@ -302,8 +295,7 @@ class ASRServerEngine:
 # 전역 컨텍스트 (싱글톤)
 # --------------------------
 _ctx: Optional[Dict[str, Any]] = None
-# infer_on_file 에서 model_name 안 넘길 때 기본값
-DEFAULT_MODEL_NAME = "korean"
+DEFAULT_MODEL_NAME = "normal"  # infer_on_file 에서 model_name 안 넘길 때 기본값
 
 def _build_server_engines(
     model_config: Sequence[Dict[str, Optional[str]]],
@@ -354,11 +346,10 @@ def infer_on_file(wav_path: str, model_name: Optional[str] = None) -> Dict[str, 
     FastAPI 서버에서 호출하는 엔트리.
     - wav_path: 로컬에 다운로드된 wav/pcm 경로
     - model_name (옵션):
-        * "korean"
+        * "normal"
         * "hearing"
         * "neuro"
-        * "hearing_adapter"
-        * "neuro_adapter"
+        * "adapter"
       지정 안 하면 DEFAULT_MODEL_NAME 사용.
     """
     ctx = get_model()
@@ -374,8 +365,8 @@ def infer_on_file(wav_path: str, model_name: Optional[str] = None) -> Dict[str, 
     return result
 
 # 편의용 래퍼 (서버에서 직접 써도 됨)
-def infer_korean(wav_path: str) -> Dict[str, Any]:
-    return infer_on_file(wav_path, model_name="korean")
+def infer_normal(wav_path: str) -> Dict[str, Any]:
+    return infer_on_file(wav_path, model_name="normal")
 
 def infer_hearing(wav_path: str) -> Dict[str, Any]:
     return infer_on_file(wav_path, model_name="hearing")
@@ -386,23 +377,16 @@ def infer_neuro(wav_path: str) -> Dict[str, Any]:
 def infer_hearing_adapter(wav_path: str) -> Dict[str, Any]:
     return infer_on_file(wav_path, model_name="hearing_adapter")
 
-def infer_neuro_adapter(wav_path: str) -> Dict[str, Any]:
-    return infer_on_file(wav_path, model_name="neuro_adapter")
-
 # --------------------------
 # (옵션) CLI 테스트용
 # --------------------------
 if __name__ == "__main__":
     import argparse, json as _json
 
-    parser = argparse.ArgumentParser(description="KoSpeech Server Inference (3 base + 2 adapters)")
+    parser = argparse.ArgumentParser(description="KoSpeech Server Inference (3 base + 1 adapter)")
     parser.add_argument("--audio_path", type=str, required=True)
-    parser.add_argument(
-        "--model_name",
-        type=str,
-        default="korean",
-        help="korean | hearing | neuro | hearing_adapter | neuro_adapter",
-    )
+    parser.add_argument("--model_name", type=str, default="korean",
+                        help="korean | hearing | neuro | adapter")
     args = parser.parse_args()
 
     out = infer_on_file(args.audio_path, model_name=args.model_name)
